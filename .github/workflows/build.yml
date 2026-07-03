@@ -1,0 +1,65 @@
+name: Build Agnes Studio (Windows)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build Tauri app (Windows)
+        run: npx tauri build --bundles msi
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ''
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+
+      - name: Upload Windows MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgnesStudio-Windows
+          path: src-tauri/target/release/bundle/msi/*.msi
+
+      - name: Upload Windows Portable EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgnesStudio-EXE
+          path: src-tauri/target/release/AgnesStudio.exe
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          $releaseNotes = "Automated Windows build of Agnes Studio v$version"
+          
+          $msiPath = Get-ChildItem src-tauri/target/release/bundle/msi/*.msi -ErrorAction SilentlyContinue
+          if ($msiPath) {
+            gh release create "v$version" $msiPath.FullName `
+              --title "Agnes Studio v$version" `
+              --notes "$releaseNotes" `
+              --target main
+          }

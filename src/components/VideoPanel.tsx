@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Video, Loader2, Download, AlertCircle, Play, Clock, CheckCircle, XCircle } from 'lucide-react';
+import { Video, Loader2, Download, AlertCircle, Play, Clock, CheckCircle, XCircle, Upload, X, SlidersHorizontal } from 'lucide-react';
 
 interface VideoTask {
   taskId: string;
   videoId: string;
   prompt: string;
+  negativePrompt: string;
   status: 'queued' | 'in_progress' | 'completed' | 'failed';
   progress: number;
   videoUrl?: string;
@@ -16,8 +17,11 @@ interface VideoPanelProps {
   apiKey: string;
 }
 
+type VideoMode = 'ti2vid' | 'keyframes';
+
 export default function VideoPanel({ apiKey }: VideoPanelProps) {
   const [prompt, setPrompt] = useState('');
+  const [negativePrompt, setNegativePrompt] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [tasks, setTasks] = useState<VideoTask[]>([]);
@@ -25,6 +29,13 @@ export default function VideoPanel({ apiKey }: VideoPanelProps) {
   const [height, setHeight] = useState(768);
   const [numFrames, setNumFrames] = useState(121);
   const [frameRate, setFrameRate] = useState(24);
+  const [cfgScale, setCfgScale] = useState(5.0);
+  const [seed, setSeed] = useState(-1);
+  const [motionBucketId, setMotionBucketId] = useState(127);
+  const [mode, setMode] = useState<VideoMode>('ti2vid');
+  const [uploadedImages, setUploadedImages] = useState<string[]>([]);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const pollIntervals = useRef<Record<string, ReturnType<typeof setInterval>>>({});
 
   const resolutions = [
@@ -87,9 +98,7 @@ export default function VideoPanel({ apiKey }: VideoPanelProps) {
   }, [apiKey]);
 
   const startPolling = useCallback((videoId: string) => {
-    // Initial poll after 5 seconds
     setTimeout(() => pollVideoStatus(videoId), 5000);
-    // Then every 8 seconds
     pollIntervals.current[videoId] = setInterval(() => pollVideoStatus(videoId), 8000);
   }, [pollVideoStatus]);
 
@@ -99,26 +108,76 @@ export default function VideoPanel({ apiKey }: VideoPanelProps) {
     };
   }, []);
 
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    const maxNew = 4 - uploadedImages.length;
+    const toAdd = Array.from(files).slice(0, maxNew);
+    for (const file of toAdd) {
+      if (!file.type.startsWith('image/')) continue;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const data = ev.target?.result as string;
+        setUploadedImages(prev => [...prev, data]);
+      };
+      reader.readAsDataURL(file);
+    }
+    e.target.value = '';
+  };
+
+  const removeUploadedImage = (index: number) => {
+    setUploadedImages(prev => prev.filter((_, i) => i !== index));
+  };
+
   const createVideoTask = async () => {
     if (!prompt.trim() || loading) return;
     setError('');
     setLoading(true);
 
     try {
+      const body: Record<string, unknown> = {
+        model: 'agnes-video-v2.0',
+        prompt: prompt.trim(),
+        height,
+        width,
+        num_frames: numFrames,
+        frame_rate: frameRate,
+      };
+
+      // Extra body params
+      const extraBody: Record<string, unknown> = {};
+
+      if (negativePrompt.trim()) {
+        extraBody.negative_prompt = negativePrompt.trim();
+      }
+
+      extraBody.cfg_scale = cfgScale;
+      extraBody.motion_bucket_id = motionBucketId;
+
+      if (seed >= 0) {
+        extraBody.seed = seed;
+      }
+
+      // Multi-image / keyframe support
+      if (uploadedImages.length > 0) {
+        extraBody.image = uploadedImages;
+      }
+
+      if (mode === 'keyframes') {
+        extraBody.mode = 'keyframes';
+      }
+
+      if (Object.keys(extraBody).length > 0) {
+        body.extra_body = extraBody;
+      }
+
       const response = await fetch('https://apihub.agnes-ai.com/v1/videos', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          model: 'agnes-video-v2.0',
-          prompt: prompt.trim(),
-          height,
-          width,
-          num_frames: numFrames,
-          frame_rate: frameRate,
-        }),
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {
@@ -132,6 +191,7 @@ export default function VideoPanel({ apiKey }: VideoPanelProps) {
         taskId: data.task_id || data.id,
         videoId: data.video_id,
         prompt: prompt.trim(),
+        negativePrompt: negativePrompt.trim(),
         status: data.status || 'queued',
         progress: data.progress || 0,
         createdAt: Date.now(),
@@ -140,6 +200,7 @@ export default function VideoPanel({ apiKey }: VideoPanelProps) {
       setTasks(prev => [task, ...prev]);
       startPolling(data.video_id);
       setPrompt('');
+      setUploadedImages([]);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unbekannter Fehler';
       setError(message);
@@ -224,7 +285,7 @@ export default function VideoPanel({ apiKey }: VideoPanelProps) {
                       onClick={() => setNumFrames(d.frames)}
                       className={`flex-1 py-2 text-xs rounded-lg transition-colors ${
                         numFrames === d.frames
-                          ? 'bg-purple-600 text-white'
+                          ? 'bg-blue-600 text-white'
                           : 'bg-[#0f0f1a] border border-[#2d2d52] text-slate-400 hover:text-white'
                       }`}
                     >
@@ -248,6 +309,7 @@ export default function VideoPanel({ apiKey }: VideoPanelProps) {
               </div>
             </div>
 
+            {/* Prompt */}
             <div>
               <label className="block text-xs font-medium text-slate-400 mb-1.5">Video-Prompt</label>
               <textarea
@@ -265,6 +327,62 @@ export default function VideoPanel({ apiKey }: VideoPanelProps) {
               />
             </div>
 
+            {/* Negative Prompt */}
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">Negativer Prompt (optional)</label>
+              <textarea
+                value={negativePrompt}
+                onChange={e => setNegativePrompt(e.target.value)}
+                rows={2}
+                placeholder="Was soll NICHT im Video sein? z.B. deformed, blurry, low quality..."
+                className="w-full bg-[#0f0f1a] border border-[#2d2d52] rounded-xl px-4 py-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-red-500/50 focus:ring-1 focus:ring-red-500/20 resize-none"
+              />
+            </div>
+
+            {/* Image upload for video generation */}
+            <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">
+                {mode === 'keyframes' ? 'Keyframes (min. 2, max. 4)' : 'Startbilder (optional - für Bild-zu-Video)'}
+              </label>
+              <div className="flex gap-2 flex-wrap mb-2">
+                {uploadedImages.map((img, i) => (
+                  <div key={i} className="relative group">
+                    <img
+                      src={img}
+                      alt={mode === 'keyframes' ? `Keyframe ${i + 1}` : 'Startbild'}
+                      className="w-24 h-24 rounded-xl object-cover border border-[#2d2d52]"
+                    />
+                    <button
+                      onClick={() => removeUploadedImage(i)}
+                      className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-red-500 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
+                      <X className="w-3 h-3 text-white" />
+                    </button>
+                  </div>
+                ))}
+                {(mode === 'keyframes' ? uploadedImages.length < 4 : uploadedImages.length < 1) && (
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="w-24 h-24 rounded-xl border-2 border-dashed border-[#2d2d52] hover:border-blue-500/50 flex items-center justify-center transition-colors"
+                  >
+                    <Upload className="w-6 h-6 text-slate-500" />
+                  </button>
+                )}
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple={mode === 'keyframes'}
+                onChange={handleImageUpload}
+                className="hidden"
+              />
+              {mode === 'keyframes' && (
+                <p className="text-[10px] text-slate-500 mt-1">Laden Sie 2–4 Keyframe-Bilder hoch. Der Modus erstellt eine fließende Transition zwischen den Bildern.</p>
+              )}
+            </div>
+
+            {/* Examples */}
             <div className="flex flex-wrap gap-2">
               {examplePrompts.map((p, i) => (
                 <button
@@ -277,9 +395,74 @@ export default function VideoPanel({ apiKey }: VideoPanelProps) {
               ))}
             </div>
 
+            {/* Advanced Settings */}
+            <button
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              className="flex items-center gap-2 text-xs text-slate-400 hover:text-white transition-colors"
+            >
+              <SlidersHorizontal className="w-3 h-3" />
+              {showAdvanced ? '▼ Erweiterte Einstellungen' : '► Erweiterte Einstellungen'}
+            </button>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => setMode('ti2vid')}
+                className={`flex-1 py-2 text-sm font-medium rounded-xl transition-colors ${
+                  mode === 'ti2vid'
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-[#0f0f1a] border border-[#2d2d52] text-slate-400 hover:text-white'
+                }`}
+              >
+                Text/Bild → Video
+              </button>
+              <button
+                onClick={() => setMode('keyframes')}
+                className={`flex-1 py-2 text-sm font-medium rounded-xl transition-colors ${
+                  mode === 'keyframes'
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-[#0f0f1a] border border-[#2d2d52] text-slate-400 hover:text-white'
+                }`}
+              >
+                Keyframe-Animation
+              </button>
+            </div>
+
+            {showAdvanced && (
+              <div className="p-3 bg-[#0f0f1a] border border-[#2d2d52] rounded-xl space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">CFG Scale: {cfgScale}</label>
+                    <input
+                      type="range" min="1" max="20" step="0.5" value={cfgScale}
+                      onChange={e => setCfgScale(parseFloat(e.target.value))}
+                      className="w-full accent-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Motion Bucket ID: {motionBucketId}</label>
+                    <input
+                      type="range" min="0" max="255" step="1" value={motionBucketId}
+                      onChange={e => setMotionBucketId(parseInt(e.target.value))}
+                      className="w-full accent-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Seed</label>
+                    <input
+                      type="number"
+                      value={seed}
+                      onChange={e => setSeed(parseInt(e.target.value) || -1)}
+                      placeholder="-1 = zufällig"
+                      className="w-full bg-[#1a1a2e] border border-[#2d2d52] rounded-lg px-3 py-2 text-xs text-slate-300 placeholder-slate-500 focus:outline-none focus:border-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
             <button
               onClick={createVideoTask}
-              disabled={!prompt.trim() || loading}
+              disabled={!prompt.trim() || loading || (mode === 'keyframes' && uploadedImages.length < 2)}
               className="w-full py-3 rounded-xl font-semibold text-white bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
             >
               {loading ? (
@@ -326,7 +509,12 @@ export default function VideoPanel({ apiKey }: VideoPanelProps) {
 
                   <div className="p-4 space-y-3">
                     <div className="flex items-start justify-between gap-3">
-                      <p className="text-sm text-slate-300 flex-1">{task.prompt}</p>
+                      <div className="flex-1">
+                        <p className="text-sm text-slate-300">{task.prompt}</p>
+                        {task.negativePrompt && (
+                          <p className="text-xs text-red-400/70 mt-1">Negativ: {task.negativePrompt}</p>
+                        )}
+                      </div>
                       <div className="flex items-center gap-1.5 flex-shrink-0">
                         {getStatusIcon(task.status)}
                         <span className={`text-xs font-medium ${
